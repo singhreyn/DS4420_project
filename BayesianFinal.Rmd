@@ -1,0 +1,237 @@
+
+```{r}
+library(ggplot2)
+
+set.seed(4420)
+```
+
+```{r}
+df <- read.csv("used_cars_cleaned.csv")
+cat("Rows loaded:", nrow(df), "\n")
+```
+
+```{r}
+df_model <- df[, c("price", "mileage", "horsepower")]
+df_model <- na.omit(df_model)
+
+#removing outliers
+df_model <- df_model[df_model$price >= 1500 & df_model$price <= 150000, ]
+cat("Rows after cleaning:", nrow(df_model), "\n")
+```
+
+```{r}
+N_SAMPLE <- 2000
+df_sample <- df_model[sample(nrow(df_model), N_SAMPLE), ]
+
+# train/test
+train_size <- round(0.8 * nrow(df_sample))
+train <- df_sample[1:train_size, ]
+test  <- df_sample[(train_size + 1):nrow(df_sample), ]
+
+cat("Train:", nrow(train), ", Test:", nrow(test), "\n")
+```
+
+```{r}
+mile_mean <- mean(train$mileage)
+mile_sd <- sd(train$mileage)
+hp_mean <- mean(train$horsepower)
+hp_sd <- sd(train$horsepower)
+price_mean <- mean(train$price)
+price_sd <- sd(train$price)
+
+X_train <- cbind(
+  1,
+  (train$mileage - mile_mean) / mile_sd,
+  (train$horsepower - hp_mean) / hp_sd
+)
+y_train <- (train$price - price_mean) / price_sd
+
+X_test <- cbind(
+  1,
+  (test$mileage - mile_mean) / mile_sd,
+  (test$horsepower - hp_mean) / hp_sd
+)
+y_test <- (test$price - price_mean) / price_sd
+```
+
+```{r}
+# the likelihood
+likelihood <- function(beta, sigma, X, y) {
+  mu <- X %*% beta
+  prod(dnorm(y, mean = mu, sd = sigma))
+}
+
+# the prior
+prior <- function(beta, sigma) {
+  if (sigma <= 0) return(0)
+  dnorm(beta[1], 0, 1) * dnorm(beta[2], 0, 1) * dnorm(beta[3], 0, 1)
+}
+
+
+log_posterior <- function(beta, sigma, X, y) {
+  if (sigma <= 0) return(-Inf)
+  mu <- X %*% beta
+  log_lik <- sum(dnorm(y, mean = mu, sd = sigma, log = TRUE))
+  log_pri <- sum(dnorm(beta, 0, 1, log = TRUE))
+  log_lik + log_pri
+}
+```
+
+```{r}
+#  metropolis algo
+metropolis_sampling_bayesian <- function(X, y, n = 10000, sigma_prop = 0.015, burn = 0.18) {
+  samples <- list()
+  beta <- c(0, 0, 0)
+  sigma <- 1
+  total_samples <- as.integer(n / (1 - burn))
+  m <- as.integer(total_samples * burn)
+  accepted <- 0
+
+  current_log_post <- log_posterior(beta, sigma, X, y)
+
+  while (length(samples) < total_samples) {
+    beta_prop <- rnorm(3, beta, sigma_prop)
+    sigma_prop_val <- rnorm(1, sigma, sigma_prop)
+
+    prop_log_post <- log_posterior(beta_prop, sigma_prop_val, X, y)
+    alpha <- exp(prop_log_post - current_log_post)
+
+    if (runif(1) < alpha) {
+      beta <- beta_prop
+      sigma <- sigma_prop_val
+      current_log_post <- prop_log_post
+      accepted <- accepted + 1
+    }
+    samples[[length(samples) + 1]] <- c(beta, sigma)
+  }
+
+  acceptance_rate <- accepted / total_samples
+  cat(sprintf('Acceptance rate: %.3f\n', acceptance_rate))
+
+  samples <- do.call(rbind, samples)
+  samples <- samples[(m + 1):nrow(samples), ]
+  return(samples)
+}
+```
+
+```{r}
+# generate the samples
+samples_bayes <- metropolis_sampling_bayesian(X_train, y_train)
+nrow(samples_bayes)
+```
+
+```{r}
+plot(samples_bayes[,1], type = "l", main = "Convergence of beta0 (intercept)")
+plot(samples_bayes[,2], type = "l", main = "Convergence of beta1 (mileage)")
+plot(samples_bayes[,3], type = "l", main = "Convergence of beta2 (horsepower)")
+plot(samples_bayes[,4], type = "l", main = "Convergence of sigma")
+```
+
+```{r}
+acf(samples_bayes[,1], main = "beta0 ACF")
+acf(samples_bayes[,2], main = "beta1 ACF")
+acf(samples_bayes[,3], main = "beta2 ACF")
+```
+
+```{r}
+thinned_samples <- samples_bayes[seq(1, nrow(samples_bayes), by = 10), ]
+
+acf(thinned_samples[, 2], main = "beta1 (thinned) ACF")
+acf(thinned_samples[, 3], main = "beta2 (thinned) ACF")
+```
+
+```{r}
+# posterior 
+
+posterior_mean <- colMeans(thinned_samples)
+print(posterior_mean)
+```
+
+```{r}
+sim_beta <- seq(-3, 3, length.out = 1000)
+prior_dist <- dnorm(sim_beta, 0, 1)
+
+plot_df <- data.frame(beta = sim_beta, Prior = prior_dist)
+post_beta1 <- thinned_samples[,2]
+
+ggplot() +
+  geom_line(data = plot_df, aes(x = beta, y = Prior, color = 'red')) +
+  geom_density(data = data.frame(post = post_beta1), aes(x = post, color = 'purple')) +
+  geom_vline(xintercept = mean(post_beta1), color = "purple") +
+  geom_vline(xintercept = 0, color = "red") +
+  labs(title = "Prior vs Posterior for beta1 (mileage)",
+       x = expression(beta[1]), y = expression(p(beta[1]))) +
+  scale_color_manual(name = "Legend", values = c("red" = "red", "purple" = "purple"))
+
+post_beta2 <- thinned_samples[,3]
+
+ggplot() +
+  geom_line(data = plot_df, aes(x = beta, y = Prior, color = 'red')) +
+  geom_density(data = data.frame(post = post_beta2), aes(x = post, color = 'purple')) +
+  geom_vline(xintercept = mean(post_beta2), color = "purple") +
+  geom_vline(xintercept = 0, color = "red") +
+  labs(title = "Prior vs Posterior for beta2 (horsepower)",
+       x = expression(beta[2]), y = expression(p(beta[2]))) +
+  scale_color_manual(name = "Legend", values = c("red" = "red", "purple" = "purple"))
+```
+
+```{r}
+beta_samples <- thinned_samples[, 1:3]
+sigma_samples <- thinned_samples[, 4]
+
+pred_scaled <- X_test %*% t(beta_samples)
+for (j in 1:ncol(pred_scaled)) {
+  pred_scaled[, j] <- pred_scaled[, j] + rnorm(nrow(pred_scaled), 0, sigma_samples[j])
+}
+
+pred_mean_scaled <- rowMeans(pred_scaled)
+ci_lower_scaled <- apply(pred_scaled, 1, quantile, probs = 0.05)
+ci_upper_scaled <- apply(pred_scaled, 1, quantile, probs = 0.95)
+
+pred_mean <- pred_mean_scaled * price_sd + price_mean
+ci_lower <- ci_lower_scaled * price_sd + price_mean
+ci_upper <- ci_upper_scaled * price_sd + price_mean
+
+actual <- test$price
+resid <- actual - pred_mean
+```
+
+```{r}
+mae <- mean(abs(resid))
+rmse <- sqrt(mean(resid^2))
+r2 <- 1 - sum(resid^2) / sum((actual - mean(actual))^2)
+coverage <- mean(actual >= ci_lower & actual <= ci_upper)
+
+cat(sprintf("MAE: $%.2f\n", mae))
+cat(sprintf("RMSE: $%.2f\n", rmse))
+cat(sprintf("R-squared: %.4f\n", r2))
+cat(sprintf("90%% CI Coverage: %.1f%%\n", coverage * 100))
+```
+
+```{r}
+results_df <- data.frame(
+  actual = actual,
+  predicted = pred_mean,
+  ci_lower = ci_lower,
+  ci_upper = ci_upper
+)
+
+ggplot(results_df, aes(x = actual, y = predicted)) +
+  geom_point(alpha = 0.3, color = "purple", size = 1) +
+  geom_abline(slope = 1, intercept = 0, color = "red") +
+  labs(title = "Bayesian Regression: Actual vs. Predicted Price",
+       x = "Actual Price", y = "Predicted Price (Posterior Mean)")
+```
+
+```{r}
+sample_df <- results_df[sample(nrow(results_df), 20), ]
+sample_df$obs <- seq_len(20)
+
+ggplot(sample_df, aes(x = obs)) +
+  geom_errorbar(aes(ymin = ci_lower, ymax = ci_upper), width = 0.3, color = "purple") +
+  geom_point(aes(y = predicted, color = "Predicted"), size = 2) +
+  geom_point(aes(y = actual, color = "Actual"), size = 2, shape = 4) +
+  labs(title = "Sample Predictions with 90% Credible Intervals",
+       x = "Observation", y = "Price") +
+  scale_color_manual(name = "", values = c("Predicted" = "purple", "Actual" = "red"))
+```
